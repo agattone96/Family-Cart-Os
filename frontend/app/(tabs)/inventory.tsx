@@ -6,9 +6,9 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { Colors, Shadows } from '../../src/utils/theme';
-import { api } from '../../src/utils/api';
+import { api, isInventoryDuplicateApiError } from '../../src/utils/api';
 import { storage, storageKeys } from '../../src/utils/storage';
-import type { InventoryItem, InventoryLocation } from '../../src/types/app';
+import type { InventoryBatchCreateConflict, InventoryItem, InventoryLocation } from '../../src/types/app';
 import { useAppSession } from '../../src/context/AppSessionContext';
 
 const LOCATIONS: InventoryLocation[] = ['pantry', 'fridge', 'freezer'];
@@ -93,6 +93,8 @@ export default function Inventory() {
   const [extracting, setExtracting] = useState(false);
   const [extracted, setExtracted] = useState<InventoryItem[]>([]);
   const [showExtracted, setShowExtracted] = useState(false);
+  const [batchConflicts, setBatchConflicts] = useState<InventoryBatchCreateConflict[]>([]);
+  const [batchSummaryMessage, setBatchSummaryMessage] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -190,6 +192,32 @@ export default function Inventory() {
       storage.set(storageKeys.lastInventoryLocation, addDraft.location).catch(() => {});
       setShowAdd(false);
     } catch (e: any) {
+      if (isInventoryDuplicateApiError(e)) {
+        const duplicate = e.payload.duplicate;
+        const existingItem = allItems.find((item) => item.id === duplicate.existing_item_id)
+          || allItems.find(
+            (item) => item.location === duplicate.location
+              && item.normalized_name === duplicate.normalized_name,
+          );
+        const locationTitle = LOC_TITLES[duplicate.location];
+        Alert.alert(
+          'Duplicate item',
+          `Already in ${locationTitle}.`,
+          [
+            ...(existingItem
+              ? [{
+                text: 'Edit existing item',
+                onPress: () => {
+                  setShowAdd(false);
+                  openEditModal(existingItem);
+                },
+              }]
+              : []),
+            { text: 'Cancel', style: 'cancel' },
+          ],
+        );
+        return;
+      }
       Alert.alert('Error', e.message || 'Could not add item');
     }
   };
@@ -255,6 +283,8 @@ export default function Inventory() {
       const res = await api.extractPhoto(result.assets[0].base64, defaultLocation);
       if (res.items?.length > 0) {
         setExtracted(res.items);
+        setBatchConflicts([]);
+        setBatchSummaryMessage(null);
         setShowExtracted(true);
       } else {
         Alert.alert('No items found', 'Try a clearer photo.');
@@ -268,7 +298,7 @@ export default function Inventory() {
 
   const saveExtracted = async () => {
     try {
-      const saved = await api.addInventoryBatch(
+      const result = await api.addInventoryBatch(
         extracted.map((i) => ({
           name: i.name,
           quantity: i.quantity ?? undefined,
@@ -276,7 +306,19 @@ export default function Inventory() {
           location: defaultLocation,
         })),
       );
-      setAllItems((prev) => [...saved, ...prev]);
+      const created = Array.isArray(result) ? result : result.created || [];
+      const conflicts = Array.isArray(result) ? [] : result.conflicts || [];
+
+      if (created.length > 0) {
+        setAllItems((prev) => [...created, ...prev]);
+      }
+      if (conflicts.length > 0) {
+        setBatchConflicts(conflicts);
+        setBatchSummaryMessage(`Added ${created.length} items, ${conflicts.length} duplicates skipped.`);
+      } else {
+        setBatchConflicts([]);
+        setBatchSummaryMessage(created.length > 0 ? `Added ${created.length} items.` : null);
+      }
       setShowExtracted(false);
       setExtracted([]);
     } catch (e: any) {
@@ -443,6 +485,22 @@ export default function Inventory() {
         <View style={s.banner}>
           <ActivityIndicator size="small" color={Colors.accent} />
           <Text style={s.bannerText}>Scanning photo...</Text>
+        </View>
+      )}
+      {batchSummaryMessage && (
+        <View style={[s.banner, s.duplicateBanner]} testID="batch-summary-banner">
+          <Ionicons name="checkmark-done-outline" size={16} color={Colors.primary} />
+          <Text style={s.bannerText}>{batchSummaryMessage}</Text>
+        </View>
+      )}
+      {batchConflicts.length > 0 && (
+        <View style={[s.banner, s.conflictsWrap]} testID="batch-conflicts-section">
+          <Text style={s.duplicateTitle}>Review duplicates</Text>
+          {batchConflicts.map((conflict) => (
+            <Text key={`${conflict.index}-${conflict.existing_item_id}`} style={s.duplicateItem}>
+              • {conflict.name} — {LOC_TITLES[conflict.location]}
+            </Text>
+          ))}
         </View>
       )}
 
@@ -745,6 +803,10 @@ const s = StyleSheet.create({
 
   banner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.surface, margin: 20, marginBottom: 0, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: Colors.warning + '40' },
   bannerText: { fontSize: 13, color: Colors.textSecondary },
+  duplicateBanner: { borderColor: Colors.primary + '35' },
+  conflictsWrap: { alignItems: 'flex-start', flexDirection: 'column', gap: 4, borderColor: Colors.warning + '55' },
+  duplicateTitle: { fontSize: 13, fontWeight: '700', color: Colors.textMain },
+  duplicateItem: { fontSize: 13, color: Colors.textSecondary },
 
   listContent: { padding: 20, paddingBottom: 60 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 18, marginBottom: 10 },

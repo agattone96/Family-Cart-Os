@@ -34,6 +34,26 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required. Copy `.env.example` to `.env` and set DATABASE_URL.")
 
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development").strip().lower()
+
+
+def _parse_cors_origins() -> list[str]:
+    explicit = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+    if explicit:
+        return [origin.strip() for origin in explicit.split(",") if origin.strip()]
+    if ENVIRONMENT == "production":
+        # Production should define explicit allowed origins via CORS_ALLOWED_ORIGINS.
+        return []
+    # Development-safe defaults.
+    return [
+        "http://localhost:8081",
+        "http://localhost:19006",
+        "http://127.0.0.1:8081",
+        "http://127.0.0.1:19006",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
@@ -1744,7 +1764,7 @@ app.include_router(family_cart.build_router())
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=_parse_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
