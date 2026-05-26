@@ -67,3 +67,40 @@ export interface InventoryDashboard {
   low_stock: InventoryItem[];
   expiring_soon: InventoryItem[];
 }
+
+
+export interface InventoryDuplicateConflict {
+  existing_item_id: string;
+  name: string;
+  normalized_name: string;
+  location: InventoryLocation;
+}
+
+export interface InventoryDuplicateErrorPayload {
+  detail: string;
+  error_code: 'INVENTORY_DUPLICATE';
+  duplicate: InventoryDuplicateConflict;
+}
+
+export interface InventoryBatchSkippedItem {
+  index: number;
+  reason: string;
+}
+
+export interface InventoryBatchCreateConflict extends InventoryDuplicateConflict {
+  index: number;
+  error_code: 'INVENTORY_DUPLICATE';
+}
+
+export interface InventoryBatchCreateSummary {
+  created_count: number;
+  conflict_count: number;
+  skipped_count: number;
+}
+
+export interface InventoryBatchCreateResult {
+  created: InventoryItem[];
+  conflicts: InventoryBatchCreateConflict[];
+  skipped: InventoryBatchSkippedItem[];
+  summary: InventoryBatchCreateSummary;
+}
