@@ -127,6 +127,8 @@ class FakeStore:
                 rows = [r for r in rows if r.get("archived_at") is None]
             if "location" in bindings and "location =" in where_clause:
                 rows = [r for r in rows if r["location"] == bindings["location"]]
+            if "normalized_name" in bindings and "normalized_name =" in where_clause:
+                rows = [r for r in rows if r.get("normalized_name") == bindings["normalized_name"]]
             if "normalized_name" in bindings and "normalized_name LIKE" in where_clause:
                 like = bindings["normalized_name"].strip("%")
                 rows = [r for r in rows if like in (r.get("normalized_name") or "")]
@@ -248,6 +250,51 @@ def test_fast_add_updates_last_inventory_location(authed_client):
     client, user_id, store = authed_client
     client.post("/api/inventory", json={"name": "Frozen Peas", "location": "freezer"})
     assert store.households[user_id]["last_inventory_location"] == "freezer"
+
+
+def test_single_add_returns_409_for_active_duplicate(authed_client):
+    client, *_ = authed_client
+    first = client.post("/api/inventory", json={"name": "Oats", "location": "pantry"}).json()
+    resp = client.post("/api/inventory", json={"name": "  oats ", "location": "pantry"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["detail"] == "Duplicate inventory item"
+    assert body["error_code"] == "INVENTORY_DUPLICATE"
+    assert body["duplicate"]["existing_item_id"] == first["id"]
+    assert body["duplicate"]["normalized_name"] == "oats"
+    assert body["duplicate"]["location"] == "pantry"
+
+
+def test_single_add_allows_same_normalized_name_in_different_location(authed_client):
+    client, *_ = authed_client
+    assert client.post("/api/inventory", json={"name": "Oats", "location": "pantry"}).status_code == 200
+    assert client.post("/api/inventory", json={"name": "oats", "location": "fridge"}).status_code == 200
+
+
+def test_single_add_allows_duplicate_name_for_different_owner(fake_store):
+    token_a, token_b = "token-a", "token-b"
+    fake_store.sessions[token_a] = {
+        "id": "sess-a", "user_id": "user-a", "token": token_a, "email": "a@example.com", "name": "A",
+        "created_at": datetime.now(timezone.utc),
+    }
+    fake_store.sessions[token_b] = {
+        "id": "sess-b", "user_id": "user-b", "token": token_b, "email": "b@example.com", "name": "B",
+        "created_at": datetime.now(timezone.utc),
+    }
+    client_a = TestClient(server.app)
+    client_b = TestClient(server.app)
+    client_a.headers.update({"Authorization": f"Bearer {token_a}"})
+    client_b.headers.update({"Authorization": f"Bearer {token_b}"})
+    assert client_a.post("/api/inventory", json={"name": "Oats", "location": "pantry"}).status_code == 200
+    assert client_b.post("/api/inventory", json={"name": "Oats", "location": "pantry"}).status_code == 200
+
+
+def test_single_add_allows_recreate_when_matching_item_archived(authed_client):
+    client, *_ = authed_client
+    created = client.post("/api/inventory", json={"name": "Oats", "location": "pantry"}).json()
+    assert client.post(f"/api/inventory/{created['id']}/archive").status_code == 200
+    resp = client.post("/api/inventory", json={"name": "Oats", "location": "pantry"})
+    assert resp.status_code == 200
 
 
 # ─── Listing, filtering, search ──────────────────────────────────────────────
@@ -392,7 +439,48 @@ def test_batch_creation_skips_blank_names_and_assigns_normalized_names(authed_cl
         ],
     )
     assert resp.status_code == 200
-    rows = resp.json()
+    body = resp.json()
+    rows = body["created"]
     assert [row["name"] for row in rows] == ["Olive Oil", "Frozen Berries"]
+    assert body["skipped"] == [{"index": 1, "reason": "blank_name"}]
+    assert body["conflicts"] == []
+    assert body["summary"] == {"created_count": 2, "conflict_count": 0, "skipped_count": 1}
     assert all(row["normalized_name"] for row in rows)
     assert store.households[_user_id]["last_inventory_location"] == "freezer"
+
+
+def test_batch_reports_db_and_intra_request_duplicates_deterministically(authed_client):
+    client, *_ = authed_client
+    existing = client.post("/api/inventory", json={"name": "Oats", "location": "pantry"}).json()
+    resp = client.post(
+        "/api/inventory/batch",
+        json=[
+            {"name": "Rice", "location": "pantry"},
+            {"name": "Oats", "location": "pantry"},
+            {"name": " rice ", "location": "pantry"},
+            {"name": "  ", "location": "fridge"},
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [item["name"] for item in body["created"]] == ["Rice"]
+    assert body["conflicts"] == [
+        {
+            "index": 1,
+            "name": "Oats",
+            "location": "pantry",
+            "normalized_name": "oats",
+            "existing_item_id": existing["id"],
+            "error_code": "INVENTORY_DUPLICATE",
+        },
+        {
+            "index": 2,
+            "name": "rice",
+            "location": "pantry",
+            "normalized_name": "rice",
+            "existing_item_id": body["created"][0]["id"],
+            "error_code": "INVENTORY_DUPLICATE",
+        },
+    ]
+    assert body["skipped"] == [{"index": 3, "reason": "blank_name"}]
+    assert body["summary"] == {"created_count": 1, "conflict_count": 2, "skipped_count": 1}

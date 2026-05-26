@@ -14,6 +14,7 @@ import psycopg
 import requests
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
@@ -1080,6 +1081,18 @@ def _insert_inventory_row(cur, owner_id: str, item: InventoryItemCreate) -> Dict
     return doc
 
 
+def _find_active_inventory_duplicate(
+    cur, owner_id: str, normalized_name: str, location: str
+) -> Optional[Dict[str, Any]]:
+    cur.execute(
+        f"SELECT {INVENTORY_COLUMNS} FROM inventory_items "
+        "WHERE owner_id = %s AND normalized_name = %s AND location = %s AND archived_at IS NULL "
+        "ORDER BY created_at DESC LIMIT 1",
+        (owner_id, normalized_name, location),
+    )
+    return cur.fetchone()
+
+
 @api_router.post("/inventory")
 async def add_inventory_item(item: InventoryItemCreate, authorization: Optional[str] = Header(default=None)):
     session = await require_session(authorization)
@@ -1087,8 +1100,25 @@ async def add_inventory_item(item: InventoryItemCreate, authorization: Optional[
         raise HTTPException(status_code=400, detail="Item name is required")
     owner_id = session["user_id"]
     await ensure_profile(owner_id, **_profile_for_session(session))
+    normalized_name = normalize_inventory_name(item.name)
+    location = normalize_location(item.location)
     with db_conn() as conn:
         with conn.cursor() as cur:
+            duplicate = _find_active_inventory_duplicate(cur, owner_id, normalized_name, location)
+            if duplicate:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": "Duplicate inventory item",
+                        "error_code": "INVENTORY_DUPLICATE",
+                        "duplicate": {
+                            "existing_item_id": duplicate["id"],
+                            "name": duplicate["name"],
+                            "normalized_name": duplicate["normalized_name"],
+                            "location": duplicate["location"],
+                        },
+                    },
+                )
             doc = _insert_inventory_row(cur, owner_id, item)
         conn.commit()
     _update_last_inventory_location(owner_id, item.location)
@@ -1103,22 +1133,54 @@ async def add_inventory_batch(items: List[InventoryItemCreate], authorization: O
     owner_id = session["user_id"]
     profile = await ensure_profile(owner_id, **_profile_for_session(session))
     window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
-    results: List[Dict[str, Any]] = []
+    created: List[Dict[str, Any]] = []
+    conflicts: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
     if not items:
-        return results
+        return {
+            "created": [],
+            "conflicts": [],
+            "skipped": [],
+            "summary": {"created_count": 0, "conflict_count": 0, "skipped_count": 0},
+        }
     last_location: Optional[str] = None
     with db_conn() as conn:
         with conn.cursor() as cur:
-            for item in items:
+            for index, item in enumerate(items):
                 if not item.name or not item.name.strip():
+                    skipped.append({"index": index, "reason": "blank_name"})
+                    continue
+                normalized_name = normalize_inventory_name(item.name)
+                location = normalize_location(item.location)
+                duplicate = _find_active_inventory_duplicate(cur, owner_id, normalized_name, location)
+                if duplicate:
+                    conflicts.append(
+                        {
+                            "index": index,
+                            "name": item.name.strip(),
+                            "location": location,
+                            "normalized_name": normalized_name,
+                            "existing_item_id": duplicate["id"],
+                            "error_code": "INVENTORY_DUPLICATE",
+                        }
+                    )
                     continue
                 doc = _insert_inventory_row(cur, owner_id, item)
-                results.append(annotate_inventory_item(doc, window_days))
+                created.append(annotate_inventory_item(doc, window_days))
                 last_location = doc["location"]
         conn.commit()
     if last_location:
         _update_last_inventory_location(owner_id, last_location)
-    return results
+    return {
+        "created": created,
+        "conflicts": conflicts,
+        "skipped": skipped,
+        "summary": {
+            "created_count": len(created),
+            "conflict_count": len(conflicts),
+            "skipped_count": len(skipped),
+        },
+    }
 
 
 @api_router.put("/inventory/{item_id}")
