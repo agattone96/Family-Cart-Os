@@ -2,17 +2,16 @@
 
 ## Frontend
 
-The frontend is deployed on Netlify.
+The frontend is deployed on Vercel (Expo web build).
 
-### Netlify settings
+### Frontend build settings
 
 - Base directory: `frontend`
 - Build command: `npx expo export --platform web`
 - Publish directory: `dist`
-- Redirect rule: `/.netlify/identity/* -> /.netlify/identity/:splat (200)`
-- SPA fallback: `/* -> /index.html (200)`
+- SPA fallback/rewrites configured via `vercel.json`
 
-### Required Netlify environment variable
+### Required Vercel environment variable
 
 - `EXPO_PUBLIC_BACKEND_URL=https://<your-render-service>.onrender.com`
 
@@ -54,6 +53,8 @@ The backend is prepared for Render using [`render.yaml`](./render.yaml).
 
 - `DATABASE_URL` = Neon Postgres connection string
 - `OPENAI_API_KEY`
+- `ENVIRONMENT=production`
+- `CORS_ALLOWED_ORIGINS=https://YOUR-VERCEL-FRONTEND.vercel.app`
 
 ### Optional
 
@@ -80,3 +81,62 @@ export async function getData() {
   const data = await sql`...`;
   return data;
 }
+
+
+## Backend (Fly.io explicit config, no add-ons)
+
+This backend uses **Neon PostgreSQL**, so do **not** use Fly Managed Postgres.
+This app does **not** require object storage, so do **not** enable Tigris (and do not run `flyctl ext tigris create`).
+
+Use CLI deploy from `backend/` with explicit config to avoid Fly UI add-on guessing.
+
+- Working directory: `backend`
+- Config path from repo root: `backend/fly.toml`
+- Config path inside backend dir: `fly.toml`
+- Internal port: `8000`
+
+### Fly deploy commands (from repo root)
+
+```zsh
+cd backend
+
+fly auth login
+
+fly apps create diana-backend --org personal
+
+fly secrets set DATABASE_URL='PASTE_REAL_NEON_DATABASE_URL_HERE'
+fly secrets set ENVIRONMENT='production'
+fly secrets set CORS_ALLOWED_ORIGINS='https://diana-git-codex-fix-expo-frontend-environ-15f503-allis-projects.vercel.app'
+
+# Optional only if enabled backend features need them
+# fly secrets set OPENAI_API_KEY='PASTE_REAL_KEY_HERE'
+# fly secrets set EMERGENT_LLM_KEY='PASTE_REAL_KEY_HERE'
+
+fly secrets list
+
+fly deploy -a diana-backend
+
+fly status -a diana-backend
+
+fly logs -a diana-backend
+
+curl https://diana-backend.fly.dev/health
+```
+
+Expected:
+
+```json
+{"ok":true}
+```
+
+### Vercel frontend update
+
+Set in Vercel frontend project:
+
+- `EXPO_PUBLIC_BACKEND_URL=https://diana-backend.fly.dev`
+
+Ensure this is **not** set in Vercel frontend:
+
+- `DATABASE_URL`
+
+Redeploy Vercel frontend after env updates.
