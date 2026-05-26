@@ -71,6 +71,26 @@ async function request(path: string, options?: RequestInit) {
   return res.json();
 }
 
+export interface InventoryQuery {
+  location?: string;
+  search?: string;
+  lowStock?: boolean;
+  expiringSoon?: boolean;
+  includeArchived?: boolean;
+}
+
+function buildInventoryQuery(opts?: InventoryQuery): string {
+  if (!opts) return '';
+  const params = new URLSearchParams();
+  if (opts.location) params.set('location', opts.location);
+  if (opts.search) params.set('search', opts.search);
+  if (opts.lowStock) params.set('low_stock', 'true');
+  if (opts.expiringSoon) params.set('expiring_soon', 'true');
+  if (opts.includeArchived) params.set('include_archived', 'true');
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
 export const api = {
   signup: (data: { name: string; email: string; password: string }) =>
     request('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),
@@ -83,10 +103,17 @@ export const api = {
   updateProfile: (data: any) => request('/profile', { method: 'PUT', body: JSON.stringify(data) }),
   resetProfile: () => request('/profile/reset', { method: 'POST' }),
 
-  getInventory: (location?: string) => request(`/inventory${location ? `?location=${location}` : ''}`),
+  getInventory: (locationOrQuery?: string | InventoryQuery) => {
+    if (typeof locationOrQuery === 'string') {
+      return request(`/inventory${locationOrQuery ? `?location=${locationOrQuery}` : ''}`);
+    }
+    return request(`/inventory${buildInventoryQuery(locationOrQuery)}`);
+  },
+  getInventoryDashboard: () => request('/inventory/dashboard'),
   addInventoryItem: (item: any) => request('/inventory', { method: 'POST', body: JSON.stringify(item) }),
   addInventoryBatch: (items: any[]) => request('/inventory/batch', { method: 'POST', body: JSON.stringify(items) }),
   updateInventoryItem: (id: string, data: any) => request(`/inventory/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  archiveInventoryItem: (id: string) => request(`/inventory/${id}/archive`, { method: 'POST' }),
   deleteInventoryItem: (id: string) => request(`/inventory/${id}`, { method: 'DELETE' }),
   extractPhoto: (image_base64: string, location: string) =>
     request('/inventory/extract-photo', { method: 'POST', body: JSON.stringify({ image_base64, location }) }),

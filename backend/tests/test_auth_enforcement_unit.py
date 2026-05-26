@@ -1,4 +1,4 @@
-import re
+import ast
 import os
 from pathlib import Path
 
@@ -18,7 +18,9 @@ PROTECTED_ENDPOINTS = [
     "add_inventory_item",
     "add_inventory_batch",
     "update_inventory_item",
+    "archive_inventory_item",
     "delete_inventory_item",
+    "get_inventory_dashboard",
     "get_required_items",
     "add_required_item",
     "update_required_item",
@@ -59,8 +61,26 @@ def test_public_owner_fallback_removed_from_server_source():
     assert "if session else" not in source
 
 
+def _function_calls_require_session(func: ast.AsyncFunctionDef) -> bool:
+    for node in ast.walk(func):
+        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+            call = node.value
+            target = call.func
+            name = getattr(target, "id", None) or getattr(target, "attr", None)
+            if name == "require_session":
+                for arg in call.args:
+                    if isinstance(arg, ast.Name) and arg.id == "authorization":
+                        return True
+    return False
+
+
 @pytest.mark.parametrize("endpoint_name", PROTECTED_ENDPOINTS)
 def test_protected_endpoints_enforce_session(endpoint_name):
-    source = Path(server.__file__).read_text()
-    pattern = rf"async def {endpoint_name}\([^)]*\):[\s\S]*?await require_session\(authorization\)"
-    assert re.search(pattern, source), f"{endpoint_name} must call require_session(authorization)"
+    tree = ast.parse(Path(server.__file__).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == endpoint_name:
+            assert _function_calls_require_session(node), (
+                f"{endpoint_name} must call require_session(authorization)"
+            )
+            return
+    pytest.fail(f"Endpoint {endpoint_name} not found in server.py")

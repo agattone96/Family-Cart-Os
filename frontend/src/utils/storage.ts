@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const storageKeys = {
   authToken: 'diana.authToken',
+  lastInventoryLocation: 'diana.lastInventoryLocation',
 };
 
 export const storage = {
