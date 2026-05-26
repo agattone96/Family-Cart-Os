@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-      EXPO_PUBLIC_BACKEND_URL: ${{ secrets.EXPO_PUBLIC_BACKEND_URL || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,11 +21,13 @@ jobs:
         run: pytest -q backend/tests/test_auth_enforcement_unit.py
 
       - name: Run backend integration tests (optional)
-        if: ${{ env.EXPO_PUBLIC_BACKEND_URL != '' }}
+        if: ${{ secrets.EXPO_PUBLIC_BACKEND_URL != '' }}
+        env:
+          EXPO_PUBLIC_BACKEND_URL: ${{ secrets.EXPO_PUBLIC_BACKEND_URL }}
         run: pytest -q backend/tests/test_backend_apis.py
 
       - name: Skip backend integration tests (no backend URL configured)
-        if: ${{ env.EXPO_PUBLIC_BACKEND_URL == '' }}
+        if: ${{ secrets.EXPO_PUBLIC_BACKEND_URL == '' }}
         run: echo "Skipping backend integration tests because EXPO_PUBLIC_BACKEND_URL is not set."
 
   frontend:
