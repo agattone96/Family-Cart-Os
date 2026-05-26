@@ -7,7 +7,7 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const rows = await sql<{ now: string }[]>`SELECT NOW() AS now;`;
+    const rows = (await sql`SELECT NOW() AS now;`) as Array<{ now: string }>;
     return res.status(200).json({ ok: true, now: rows[0]?.now ?? null });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
