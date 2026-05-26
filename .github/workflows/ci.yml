@@ -8,6 +8,8 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,8 +17,18 @@ jobs:
           python-version: "3.12"
       - name: Install backend deps
         run: python -m pip install -r backend/requirements.txt
-      - name: Run tests
-        run: pytest -q
+      - name: Run required backend unit tests
+        run: pytest -q backend/tests/test_auth_enforcement_unit.py
+
+      - name: Run backend integration tests (optional)
+        if: ${{ secrets.EXPO_PUBLIC_BACKEND_URL != '' }}
+        env:
+          EXPO_PUBLIC_BACKEND_URL: ${{ secrets.EXPO_PUBLIC_BACKEND_URL }}
+        run: pytest -q backend/tests/test_backend_apis.py
+
+      - name: Skip backend integration tests (no backend URL configured)
+        if: ${{ secrets.EXPO_PUBLIC_BACKEND_URL == '' }}
+        run: echo "Skipping backend integration tests because EXPO_PUBLIC_BACKEND_URL is not set."
 
   frontend:
     runs-on: ubuntu-latest
@@ -49,4 +61,3 @@ jobs:
       - name: Build
         working-directory: apps/diana-web
         run: npm run build
-
