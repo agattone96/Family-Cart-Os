@@ -6,7 +6,7 @@ import logging
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -112,18 +112,40 @@ def init_schema():
                   planner_prompt_override TEXT NOT NULL DEFAULT '',
                   onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
                   onboarding_completed_at TIMESTAMPTZ,
+                  expiring_soon_days INTEGER NOT NULL DEFAULT 7,
+                  last_inventory_location TEXT NOT NULL DEFAULT 'pantry',
                   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+
+                ALTER TABLE household_defaults ADD COLUMN IF NOT EXISTS expiring_soon_days INTEGER NOT NULL DEFAULT 7;
+                ALTER TABLE household_defaults ADD COLUMN IF NOT EXISTS last_inventory_location TEXT NOT NULL DEFAULT 'pantry';
 
                 CREATE TABLE IF NOT EXISTS inventory_items (
                   id TEXT PRIMARY KEY,
                   owner_id TEXT NOT NULL,
                   name TEXT NOT NULL,
-                  quantity DOUBLE PRECISION NOT NULL,
-                  unit TEXT NOT NULL DEFAULT '',
+                  normalized_name TEXT NOT NULL DEFAULT '',
+                  quantity DOUBLE PRECISION,
+                  unit TEXT,
                   location TEXT NOT NULL DEFAULT 'pantry',
-                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                  category TEXT,
+                  expiry_date DATE,
+                  low_stock_threshold DOUBLE PRECISION,
+                  notes TEXT,
+                  archived_at TIMESTAMPTZ,
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS normalized_name TEXT NOT NULL DEFAULT '';
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS category TEXT;
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE;
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS low_stock_threshold DOUBLE PRECISION;
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS notes TEXT;
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+                ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+                ALTER TABLE inventory_items ALTER COLUMN quantity DROP NOT NULL;
+                ALTER TABLE inventory_items ALTER COLUMN unit DROP NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS required_items (
                   id TEXT PRIMARY KEY,
@@ -186,6 +208,99 @@ def normalize_list(values: Optional[List[str]]) -> List[str]:
         seen.add(key)
         result.append(value)
     return result
+
+
+import re as _re_inventory
+
+
+VALID_LOCATIONS = ("pantry", "fridge", "freezer")
+DEFAULT_EXPIRING_SOON_DAYS = 7
+
+
+def normalize_inventory_name(value: Optional[str]) -> str:
+    """Lowercased, whitespace-collapsed identifier used for ingredient matching.
+
+    Preserves the original user-visible ``name`` while giving downstream
+    features (meal planning, shopping list dedupe) a consistent key.
+    Returns an empty string when ``value`` is falsy.
+    """
+    if not value:
+        return ""
+    text = str(value).lower()
+    text = _re_inventory.sub(r"[^a-z0-9]+", " ", text)
+    text = _re_inventory.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def normalize_location(value: Optional[str], fallback: str = "pantry") -> str:
+    if value is None:
+        return fallback
+    lowered = str(value).strip().lower()
+    if lowered in VALID_LOCATIONS:
+        return lowered
+    return fallback
+
+
+def coerce_expiry_date(value: Any) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # Accept full ISO datetimes too.
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid expiry_date: {value!r}") from exc
+    raise HTTPException(status_code=400, detail=f"Invalid expiry_date: {value!r}")
+
+
+def is_low_stock(quantity: Any, threshold: Any) -> bool:
+    """True only when both quantity and threshold are present and quantity <= threshold."""
+    if quantity is None or threshold is None:
+        return False
+    try:
+        return float(quantity) <= float(threshold)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_expiring_soon(expiry_value: Any, window_days: int, today: Optional[date] = None) -> bool:
+    """True when expiry_value falls within `window_days` of today (inclusive).
+
+    Items without an ``expiry_date`` never count as expiring soon.
+    A negative offset (already past expiry) also counts as expiring soon so
+    users still see it surfaced for action.
+    """
+    if expiry_value is None or expiry_value == "":
+        return False
+    if isinstance(expiry_value, str):
+        try:
+            expiry = date.fromisoformat(expiry_value[:10])
+        except ValueError:
+            return False
+    elif isinstance(expiry_value, datetime):
+        expiry = expiry_value.date()
+    elif isinstance(expiry_value, date):
+        expiry = expiry_value
+    else:
+        return False
+    reference = today or date.today()
+    window = max(int(window_days or 0), 0)
+    delta = (expiry - reference).days
+    return delta <= window
+
+
+def annotate_inventory_item(item: Dict[str, Any], window_days: int) -> Dict[str, Any]:
+    item = dict(item)
+    item["is_low_stock"] = is_low_stock(item.get("quantity"), item.get("low_stock_threshold"))
+    item["is_expiring_soon"] = is_expiring_soon(item.get("expiry_date"), window_days)
+    return item
 
 
 def combine_options(*groups: Optional[List[str]]) -> List[str]:
@@ -320,9 +435,14 @@ def build_planner_input(config: Dict[str, Any], inventory: List[Dict[str, Any]],
         "inventoryItems": [
             {
                 "name": item["name"],
-                "quantity": item["quantity"],
-                "unit": item.get("unit", ""),
+                "normalizedName": item.get("normalized_name")
+                    or normalize_inventory_name(item.get("name", "")),
+                "quantity": item.get("quantity"),
+                "unit": item.get("unit", "") or "",
                 "location": item["location"],
+                "category": item.get("category"),
+                "expiryDate": item.get("expiry_date"),
+                "isLowStock": is_low_stock(item.get("quantity"), item.get("low_stock_threshold")),
             }
             for item in inventory
         ],
@@ -488,6 +608,8 @@ class HouseholdProfile(BaseModel):
     planner_prompt_override: str = ""
     onboarding_completed: bool = False
     onboarding_completed_at: Optional[str] = None
+    expiring_soon_days: int = DEFAULT_EXPIRING_SOON_DAYS
+    last_inventory_location: str = "pantry"
     updated_at: str = Field(default_factory=utc_now)
 
 
@@ -514,20 +636,31 @@ class ProfileUpdate(BaseModel):
     planner_prompt_override: Optional[str] = None
     onboarding_completed: Optional[bool] = None
     onboarding_completed_at: Optional[str] = None
+    expiring_soon_days: Optional[int] = None
+    last_inventory_location: Optional[str] = None
 
 
 class InventoryItemCreate(BaseModel):
     name: str
-    quantity: float = 1
-    unit: str = ""
     location: str = "pantry"
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    category: Optional[str] = None
+    expiry_date: Optional[str] = None
+    low_stock_threshold: Optional[float] = None
+    notes: Optional[str] = None
 
 
 class InventoryItemUpdate(BaseModel):
     name: Optional[str] = None
+    location: Optional[str] = None
     quantity: Optional[float] = None
     unit: Optional[str] = None
-    location: Optional[str] = None
+    category: Optional[str] = None
+    expiry_date: Optional[str] = None
+    low_stock_threshold: Optional[float] = None
+    notes: Optional[str] = None
+    archived: Optional[bool] = None
 
 
 class RequiredItemCreate(BaseModel):
@@ -840,77 +973,143 @@ async def reset_profile(authorization: Optional[str] = Header(default=None)):
     return profile
 
 
+INVENTORY_COLUMNS = (
+    "id, owner_id, name, normalized_name, quantity, unit, location, category, "
+    "expiry_date, low_stock_threshold, notes, archived_at, created_at, updated_at"
+)
+
+
+def _profile_for_session(session: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": session.get("name", "Household"),
+        "email": session.get("email"),
+    }
+
+
 @api_router.get("/inventory")
-async def get_inventory(location: Optional[str] = None, authorization: Optional[str] = Header(default=None)):
+async def get_inventory(
+    location: Optional[str] = None,
+    search: Optional[str] = None,
+    low_stock: Optional[bool] = None,
+    expiring_soon: Optional[bool] = None,
+    include_archived: bool = False,
+    authorization: Optional[str] = Header(default=None),
+):
     session = await require_session(authorization)
     owner_id = session["user_id"]
+    profile = await ensure_profile(owner_id, **_profile_for_session(session))
+    window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
+
+    clauses = ["owner_id = %s"]
+    params: List[Any] = [owner_id]
+    if not include_archived:
+        clauses.append("archived_at IS NULL")
+    if location:
+        clauses.append("location = %s")
+        params.append(normalize_location(location))
+    if search:
+        clauses.append("normalized_name LIKE %s")
+        params.append(f"%{normalize_inventory_name(search)}%")
+
+    where = " AND ".join(clauses)
     with db_conn() as conn:
         with conn.cursor() as cur:
-            if location:
-                cur.execute(
-                    "SELECT id, owner_id, name, quantity, unit, location, created_at FROM inventory_items WHERE owner_id = %s AND location = %s ORDER BY created_at DESC LIMIT 1000",
-                    (owner_id, location),
-                )
-            else:
-                cur.execute(
-                    "SELECT id, owner_id, name, quantity, unit, location, created_at FROM inventory_items WHERE owner_id = %s ORDER BY created_at DESC LIMIT 1000",
-                    (owner_id,),
-                )
+            cur.execute(
+                f"SELECT {INVENTORY_COLUMNS} FROM inventory_items WHERE {where} "
+                "ORDER BY created_at DESC LIMIT 1000",
+                params,
+            )
             rows = cur.fetchall()
-    return serialize_rows(rows)
+
+    items = [annotate_inventory_item(serialize_row(row) or {}, window_days) for row in rows]
+    if low_stock:
+        items = [item for item in items if item["is_low_stock"]]
+    if expiring_soon:
+        items = [item for item in items if item["is_expiring_soon"]]
+    return items
+
+
+def _update_last_inventory_location(owner_id: str, location: str) -> None:
+    safe = normalize_location(location)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE household_defaults SET last_inventory_location = %s WHERE owner_id = %s",
+                (safe, owner_id),
+            )
+        conn.commit()
+
+
+def _insert_inventory_row(cur, owner_id: str, item: InventoryItemCreate) -> Dict[str, Any]:
+    location = normalize_location(item.location)
+    expiry = coerce_expiry_date(item.expiry_date)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "owner_id": owner_id,
+        "name": item.name.strip(),
+        "normalized_name": normalize_inventory_name(item.name),
+        "quantity": item.quantity,
+        "unit": item.unit,
+        "location": location,
+        "category": item.category,
+        "expiry_date": expiry.isoformat() if expiry else None,
+        "low_stock_threshold": item.low_stock_threshold,
+        "notes": item.notes,
+        "archived_at": None,
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+    }
+    cur.execute(
+        f"INSERT INTO inventory_items ({INVENTORY_COLUMNS}) VALUES ("
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s::timestamptz, %s::timestamptz)",
+        (
+            doc["id"], doc["owner_id"], doc["name"], doc["normalized_name"], doc["quantity"],
+            doc["unit"], doc["location"], doc["category"], doc["expiry_date"],
+            doc["low_stock_threshold"], doc["notes"], doc["archived_at"],
+            doc["created_at"], doc["updated_at"],
+        ),
+    )
+    return doc
 
 
 @api_router.post("/inventory")
 async def add_inventory_item(item: InventoryItemCreate, authorization: Optional[str] = Header(default=None)):
     session = await require_session(authorization)
-    doc = {
-        "id": str(uuid.uuid4()),
-        "owner_id": session["user_id"],
-        "name": item.name,
-        "quantity": item.quantity,
-        "unit": item.unit,
-        "location": item.location,
-        "created_at": utc_now(),
-    }
+    if not item.name or not item.name.strip():
+        raise HTTPException(status_code=400, detail="Item name is required")
+    owner_id = session["user_id"]
+    await ensure_profile(owner_id, **_profile_for_session(session))
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO inventory_items (id, owner_id, name, quantity, unit, location, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::timestamptz)
-                """,
-                (doc["id"], doc["owner_id"], doc["name"], doc["quantity"], doc["unit"], doc["location"], doc["created_at"]),
-            )
+            doc = _insert_inventory_row(cur, owner_id, item)
         conn.commit()
-    return doc
+    _update_last_inventory_location(owner_id, item.location)
+    profile = await ensure_profile(owner_id, **_profile_for_session(session))
+    window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
+    return annotate_inventory_item(doc, window_days)
 
 
 @api_router.post("/inventory/batch")
 async def add_inventory_batch(items: List[InventoryItemCreate], authorization: Optional[str] = Header(default=None)):
     session = await require_session(authorization)
     owner_id = session["user_id"]
-    results = []
-    for item in items:
-        doc = {
-            "id": str(uuid.uuid4()),
-            "owner_id": owner_id,
-            "name": item.name,
-            "quantity": item.quantity,
-            "unit": item.unit,
-            "location": item.location,
-            "created_at": utc_now(),
-        }
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO inventory_items (id, owner_id, name, quantity, unit, location, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::timestamptz)
-                    """,
-                    (doc["id"], doc["owner_id"], doc["name"], doc["quantity"], doc["unit"], doc["location"], doc["created_at"]),
-                )
-            conn.commit()
-        results.append(doc)
+    profile = await ensure_profile(owner_id, **_profile_for_session(session))
+    window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
+    results: List[Dict[str, Any]] = []
+    if not items:
+        return results
+    last_location: Optional[str] = None
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            for item in items:
+                if not item.name or not item.name.strip():
+                    continue
+                doc = _insert_inventory_row(cur, owner_id, item)
+                results.append(annotate_inventory_item(doc, window_days))
+                last_location = doc["location"]
+        conn.commit()
+    if last_location:
+        _update_last_inventory_location(owner_id, last_location)
     return results
 
 
@@ -918,20 +1117,57 @@ async def add_inventory_batch(items: List[InventoryItemCreate], authorization: O
 async def update_inventory_item(item_id: str, update: InventoryItemUpdate, authorization: Optional[str] = Header(default=None)):
     session = await require_session(authorization)
     owner_id = session["user_id"]
-    update_data = {k: v for k, v in update.dict().items() if v is not None}
-    if not update_data:
+    profile = await ensure_profile(owner_id, **_profile_for_session(session))
+    window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
+
+    raw = update.dict(exclude_unset=True)
+    if not raw:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    set_fields = ", ".join([f"{k} = %s" for k in update_data.keys()])
+    update_data: Dict[str, Any] = {}
+    archive_flag = raw.pop("archived", None)
+
+    for key, value in raw.items():
+        if key == "name":
+            if value is None or not str(value).strip():
+                raise HTTPException(status_code=400, detail="Name cannot be empty")
+            update_data["name"] = str(value).strip()
+            update_data["normalized_name"] = normalize_inventory_name(value)
+        elif key == "location":
+            update_data["location"] = normalize_location(value)
+        elif key == "expiry_date":
+            expiry = coerce_expiry_date(value)
+            update_data["expiry_date"] = expiry.isoformat() if expiry else None
+        else:
+            update_data[key] = value
+
+    if archive_flag is True:
+        update_data["archived_at"] = utc_now()
+    elif archive_flag is False:
+        update_data["archived_at"] = None
+
+    update_data["updated_at"] = utc_now()
+
+    def column_sql(key: str) -> str:
+        if key == "expiry_date":
+            return "expiry_date = %s::date"
+        if key in {"archived_at", "updated_at"}:
+            return f"{key} = %s::timestamptz"
+        return f"{key} = %s"
+
+    set_fields = ", ".join(column_sql(k) for k in update_data.keys())
     values = list(update_data.values()) + [item_id, owner_id]
 
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"UPDATE inventory_items SET {set_fields} WHERE id = %s AND owner_id = %s", values)
+            cur.execute(
+                f"UPDATE inventory_items SET {set_fields} WHERE id = %s AND owner_id = %s",
+                values,
+            )
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Item not found")
             cur.execute(
-                "SELECT id, owner_id, name, quantity, unit, location, created_at FROM inventory_items WHERE id = %s AND owner_id = %s",
+                f"SELECT {INVENTORY_COLUMNS} FROM inventory_items WHERE id = %s AND owner_id = %s",
                 (item_id, owner_id),
             )
             row = cur.fetchone()
@@ -939,21 +1175,84 @@ async def update_inventory_item(item_id: str, update: InventoryItemUpdate, autho
 
     if not row:
         raise HTTPException(status_code=404, detail="Item not found")
-    return serialize_row(row)
+    if "location" in update_data:
+        _update_last_inventory_location(owner_id, update_data["location"])
+    return annotate_inventory_item(serialize_row(row) or {}, window_days)
+
+
+@api_router.post("/inventory/{item_id}/archive")
+async def archive_inventory_item(item_id: str, authorization: Optional[str] = Header(default=None)):
+    session = await require_session(authorization)
+    owner_id = session["user_id"]
+    profile = await ensure_profile(owner_id, **_profile_for_session(session))
+    window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
+    archived_at = utc_now()
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE inventory_items SET archived_at = %s::timestamptz, updated_at = %s::timestamptz "
+                "WHERE id = %s AND owner_id = %s",
+                (archived_at, archived_at, item_id, owner_id),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Item not found")
+            cur.execute(
+                f"SELECT {INVENTORY_COLUMNS} FROM inventory_items WHERE id = %s AND owner_id = %s",
+                (item_id, owner_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return annotate_inventory_item(serialize_row(row) or {}, window_days)
 
 
 @api_router.delete("/inventory/{item_id}")
 async def delete_inventory_item(item_id: str, authorization: Optional[str] = Header(default=None)):
+    """Soft delete: marks the inventory item as archived rather than removing it."""
     session = await require_session(authorization)
     owner_id = session["user_id"]
+    archived_at = utc_now()
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM inventory_items WHERE id = %s AND owner_id = %s", (item_id, owner_id))
-            deleted = cur.rowcount
+            cur.execute(
+                "UPDATE inventory_items SET archived_at = %s::timestamptz, updated_at = %s::timestamptz "
+                "WHERE id = %s AND owner_id = %s AND archived_at IS NULL",
+                (archived_at, archived_at, item_id, owner_id),
+            )
+            affected = cur.rowcount
         conn.commit()
-    if deleted == 0:
+    if affected == 0:
         raise HTTPException(status_code=404, detail="Item not found")
-    return {"success": True}
+    return {"success": True, "archived_at": archived_at}
+
+
+@api_router.get("/inventory/dashboard")
+async def get_inventory_dashboard(authorization: Optional[str] = Header(default=None)):
+    """Surface low-stock and expiring-soon items for the dashboard."""
+    session = await require_session(authorization)
+    owner_id = session["user_id"]
+    profile = await ensure_profile(owner_id, **_profile_for_session(session))
+    window_days = int(profile.get("expiring_soon_days") or DEFAULT_EXPIRING_SOON_DAYS)
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {INVENTORY_COLUMNS} FROM inventory_items "
+                "WHERE owner_id = %s AND archived_at IS NULL "
+                "ORDER BY created_at DESC LIMIT 1000",
+                (owner_id,),
+            )
+            rows = cur.fetchall()
+    items = [annotate_inventory_item(serialize_row(row) or {}, window_days) for row in rows]
+    low_stock_items = [item for item in items if item["is_low_stock"]]
+    expiring_soon_items = [item for item in items if item["is_expiring_soon"]]
+    return {
+        "expiring_soon_days": window_days,
+        "last_inventory_location": profile.get("last_inventory_location", "pantry"),
+        "low_stock_count": len(low_stock_items),
+        "expiring_soon_count": len(expiring_soon_items),
+        "low_stock": low_stock_items,
+        "expiring_soon": expiring_soon_items,
+        "active_total": len(items),
+    }
 
 
 @api_router.post("/inventory/extract-photo")
@@ -1111,7 +1410,7 @@ async def generate_plan(req: GeneratePlanRequest, authorization: Optional[str] =
 
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, owner_id, name, quantity, unit, location, created_at FROM inventory_items WHERE owner_id = %s", (owner_id,))
+            cur.execute(f"SELECT {INVENTORY_COLUMNS} FROM inventory_items WHERE owner_id = %s AND archived_at IS NULL", (owner_id,))
             inventory = serialize_rows(cur.fetchall())
             cur.execute("SELECT id, owner_id, name, quantity, unit, note, category, created_at FROM required_items WHERE owner_id = %s", (owner_id,))
             required = serialize_rows(cur.fetchall())
@@ -1250,7 +1549,7 @@ async def regenerate_recipe(req: RegenerateRecipeRequest, authorization: Optiona
 
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, owner_id, name, quantity, unit, location, created_at FROM inventory_items WHERE owner_id = %s", (owner_id,))
+            cur.execute(f"SELECT {INVENTORY_COLUMNS} FROM inventory_items WHERE owner_id = %s AND archived_at IS NULL", (owner_id,))
             inventory = serialize_rows(cur.fetchall())
 
     try:

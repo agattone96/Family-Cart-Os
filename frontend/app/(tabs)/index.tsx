@@ -15,6 +15,7 @@ import {
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import ChipSelector from '../../src/components/ChipSelector';
+import InventorySnapshotCard from '../../src/components/InventorySnapshotCard';
 import NumberStepper from '../../src/components/NumberStepper';
 import { useAppSession } from '../../src/context/AppSessionContext';
 import {
@@ -181,6 +182,8 @@ export default function ThisWeek() {
                 <Text style={s.summaryText}>{summary}</Text>
               </View>
             </View>
+
+            <InventorySnapshotCard />
 
             <View style={[s.grid, columns === 2 && s.gridDesktop]}>
               <View style={s.column}>
