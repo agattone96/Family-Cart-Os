@@ -19,6 +19,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from starlette.middleware.cors import CORSMiddleware
 
+try:
+    from . import family_cart  # type: ignore
+except ImportError:  # pragma: no cover
+    import family_cart  # type: ignore
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 # Allow using a root-level `.env` (see `.env.example`) when `backend/.env` is absent.
@@ -161,6 +166,9 @@ def init_schema():
 @app.on_event("startup")
 def startup_event():
     init_schema()
+    with db_conn() as conn:
+        family_cart.init_family_cart_schema(conn)
+    family_cart.configure(session_resolver=get_session, db_factory=db_conn)
 
 
 def utc_now() -> str:
@@ -1370,6 +1378,7 @@ async def duplicate_from_history(history_id: str, authorization: Optional[str] =
 
 
 app.include_router(api_router)
+app.include_router(family_cart.build_router())
 
 app.add_middleware(
     CORSMiddleware,
