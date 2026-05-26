@@ -1,3 +1,5 @@
+import type { InventoryBatchCreateResult, InventoryDuplicateErrorPayload } from '@/src/types/app';
+
 const rawBackendUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim();
 
 function getApiBaseUrl() {
@@ -43,12 +45,27 @@ export function setApiToken(token: string | null) {
 
 export class ApiError extends Error {
   status: number;
+  payload?: unknown;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, payload?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.payload = payload;
   }
+}
+
+export function isInventoryDuplicateErrorPayload(payload: unknown): payload is InventoryDuplicateErrorPayload {
+  if (!payload || typeof payload !== 'object') return false;
+  const candidate = payload as Partial<InventoryDuplicateErrorPayload>;
+  return candidate.error_code === 'INVENTORY_DUPLICATE' && !!candidate.duplicate && typeof candidate.detail === 'string';
+}
+
+export function isInventoryDuplicateApiError(
+  error: unknown,
+): error is ApiError & { status: 409; payload: InventoryDuplicateErrorPayload } {
+  if (!(error instanceof ApiError) || error.status !== 409) return false;
+  return isInventoryDuplicateErrorPayload(error.payload);
 }
 
 async function request(path: string, options?: RequestInit) {
@@ -64,7 +81,7 @@ async function request(path: string, options?: RequestInit) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new ApiError(err.detail || 'Request failed', res.status);
+    throw new ApiError(err.detail || 'Request failed', res.status, err);
   }
 
   if (res.status === 204) return null;
@@ -111,7 +128,8 @@ export const api = {
   },
   getInventoryDashboard: () => request('/inventory/dashboard'),
   addInventoryItem: (item: any) => request('/inventory', { method: 'POST', body: JSON.stringify(item) }),
-  addInventoryBatch: (items: any[]) => request('/inventory/batch', { method: 'POST', body: JSON.stringify(items) }),
+  addInventoryBatch: (items: any[]): Promise<InventoryBatchCreateResult> =>
+    request('/inventory/batch', { method: 'POST', body: JSON.stringify(items) }),
   updateInventoryItem: (id: string, data: any) => request(`/inventory/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   archiveInventoryItem: (id: string) => request(`/inventory/${id}/archive`, { method: 'POST' }),
   deleteInventoryItem: (id: string) => request(`/inventory/${id}`, { method: 'DELETE' }),
