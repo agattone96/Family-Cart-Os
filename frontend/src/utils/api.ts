@@ -1,13 +1,15 @@
 import type { InventoryBatchCreateResult, InventoryDuplicateErrorPayload } from '@/src/types/app';
 
 const rawBackendUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim();
+const databaseSchemes = ['postgres://', 'postgresql://', 'mongodb://', 'mongodb+srv://', 'mysql://'];
 
 function getApiBaseUrl() {
   if (!rawBackendUrl) {
     throw new Error('EXPO_PUBLIC_BACKEND_URL is not configured for this build.');
   }
 
-  if (rawBackendUrl.startsWith('postgresql://') || rawBackendUrl.startsWith('postgres://')) {
+  const normalizedUrl = rawBackendUrl.toLowerCase();
+  if (databaseSchemes.some((scheme) => normalizedUrl.startsWith(scheme))) {
     throw new Error(
       'EXPO_PUBLIC_BACKEND_URL must be an https:// backend URL (for example https://<render-service>.onrender.com), not a database URL.',
     );
@@ -20,7 +22,10 @@ function getApiBaseUrl() {
     throw new Error('EXPO_PUBLIC_BACKEND_URL must be a valid absolute https:// URL.');
   }
 
-  if (parsedUrl.protocol !== 'https:') {
+  const isLocalhostHttp = parsedUrl.protocol === 'http:' && parsedUrl.hostname === 'localhost';
+  const isDevelopment = process.env.NODE_ENV !== 'production';
+
+  if (parsedUrl.protocol !== 'https:' && !(isDevelopment && isLocalhostHttp)) {
     throw new Error('EXPO_PUBLIC_BACKEND_URL must use https://.');
   }
 

@@ -19,7 +19,31 @@ Optional:
 ## Frontend (`frontend/.env`)
 
 Required:
-- `EXPO_PUBLIC_BACKEND_URL` — absolute backend base URL (for example `https://your-service.onrender.com`)
+- `EXPO_PUBLIC_BACKEND_URL` — frontend-safe backend API base URL.
+  - Local development example: `http://localhost:8000`
+  - Production example: `https://YOUR_BACKEND_API_HOST`
+  - Must not be a database URL (`postgres://`, `postgresql://`, `mongodb://`, `mongodb+srv://`, `mysql://`)
 
 The frontend calls `${EXPO_PUBLIC_BACKEND_URL}/api/*` and uses Bearer token auth.
 
+## Example variable separation
+
+Frontend-only (Expo client bundle):
+
+```dotenv
+EXPO_PUBLIC_BACKEND_URL=http://localhost:8000
+```
+
+Frontend production (Vercel build):
+
+```dotenv
+EXPO_PUBLIC_BACKEND_URL=https://YOUR_BACKEND_API_HOST
+```
+
+Backend-only runtime:
+
+```dotenv
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DB_NAME
+```
+
+`DATABASE_URL` must never be exposed to frontend code or `EXPO_PUBLIC_*` variables.
