@@ -35,6 +35,14 @@ This folder is the source of truth for Diana’s Pantry Plan documentation. Root
 - `docs/release/release-notes-template.md`
 - `DEPLOYMENT.md` — platform specifics (Netlify + Render)
 
+## QA & Release Gate (Family Cart OS v1)
+
+- `docs/qa/README.md` — start here
+- `docs/qa/mvp-release-checklist.md`
+- `docs/qa/scope-guardrail-signoff.md`
+- `docs/qa/known-issues.md`
+- `docs/qa/release-blockers.md`
+
 ## Support / Operations
 
 - `docs/support/README.md` — start here
